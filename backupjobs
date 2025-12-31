@@ -1,12 +1,5 @@
-// =====================
-// PARAMETERS
-// =====================
 let Lookback = 180d;
-let SuccessRateWindow = 30d;
 
-// =====================
-// BASE JOBS (normalize + dedupe by JobUniqueId)
-// =====================
 let Jobs =
 AddonAzureBackupJobs
 | where TimeGenerated >= ago(Lookback)
@@ -22,7 +15,6 @@ AddonAzureBackupJobs
         )),
     JobStatusNorm = tostring(column_ifexists("JobStatus","")),
     IsSuccess = tolower(JobStatusNorm) in ("completed","completedwithwarnings","succeeded","success"),
-    IsFailure = not(IsSuccess),
     VaultName = tostring(coalesce(column_ifexists("VaultName",""), column_ifexists("Vault",""))),
     SubscriptionId = tostring(coalesce(column_ifexists("SubscriptionId",""), column_ifexists("subscriptionId",""))),
     ResourceGroup = tostring(coalesce(column_ifexists("ResourceGroup",""), column_ifexists("resourceGroup",""))),
@@ -40,17 +32,13 @@ AddonAzureBackupJobs
                        DurationSecs)
 | where isnotempty(BackupItemUniqueId);
 
-// =====================
-// MONTHLY AGGREGATION (1 row per item per month)
-// =====================
 let Monthly =
 Jobs
 | extend Month = startofmonth(TimeGenerated)
 | summarize
     total_jobs = count(),
     success_jobs = countif(IsSuccess),
-    failed_jobs  = countif(IsFailure),
-    last_job_time = max(TimeGenerated),
+    failed_jobs  = countif(not(IsSuccess)),
     last_success_time = maxif(TimeGenerated, IsSuccess),
     duration_p50_secs = percentile(DurationSecs, 50),
     duration_p95_secs = percentile(DurationSecs, 95)
@@ -59,48 +47,5 @@ Jobs
     success_rate = iif(total_jobs == 0, real(null), todouble(success_jobs) / todouble(total_jobs)),
     hours_since_last_success = iif(isnull(last_success_time), real(null), datetime_diff("hour", now(), last_success_time));
 
-// =====================
-// TRAILING 30-DAY SUCCESS RATE AS-OF MONTH END
-// =====================
-let MonthlyWithTrailing =
 Monthly
-| extend MonthEnd = endofmonth(Month)
-| join kind=leftouter (
-    Jobs
-    | project BackupItemUniqueId, TimeGenerated, IsSuccess
-) on BackupItemUniqueId
-| extend WindowStart = MonthEnd - SuccessRateWindow
-| where TimeGenerated between (WindowStart .. MonthEnd)
-| summarize
-    total_jobs_30d = count(),
-    success_jobs_30d = countif(IsSuccess),
-    failed_jobs_30d = countif(not(IsSuccess)),
-    success_rate_30d_asof_month_end = iif(count() == 0, real(null), todouble(countif(IsSuccess)) / todouble(count()))
-  by Month, BackupItemUniqueId, BackupItemName, VaultName, SubscriptionId, ResourceGroup,
-     total_jobs, success_jobs, failed_jobs, last_job_time, last_success_time,
-     duration_p50_secs, duration_p95_secs, success_rate, hours_since_last_success;
-
-// =====================
-// OUTPUT
-// =====================
-MonthlyWithTrailing
-| project
-    Month,
-    SubscriptionId,
-    ResourceGroup,
-    VaultName,
-    BackupItemUniqueId,
-    BackupItemName,
-    total_jobs,
-    success_jobs,
-    failed_jobs,
-    success_rate,
-    total_jobs_30d,
-    success_jobs_30d,
-    failed_jobs_30d,
-    success_rate_30d_asof_month_end,
-    last_success_time,
-    hours_since_last_success,
-    duration_p50_secs,
-    duration_p95_secs
-| order by Month desc, success_rate_30d_asof_month_end asc
+| order by Month desc
