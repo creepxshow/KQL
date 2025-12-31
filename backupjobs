@@ -1,4 +1,5 @@
 let Lookback = 180d;
+let SuccessRateWindow = 30d;
 
 let Jobs =
 AddonAzureBackupJobs
@@ -17,19 +18,7 @@ AddonAzureBackupJobs
     IsSuccess = tolower(JobStatusNorm) in ("completed","completedwithwarnings","succeeded","success"),
     VaultName = tostring(coalesce(column_ifexists("VaultName",""), column_ifexists("Vault",""))),
     SubscriptionId = tostring(coalesce(column_ifexists("SubscriptionId",""), column_ifexists("subscriptionId",""))),
-    ResourceGroup = tostring(coalesce(column_ifexists("ResourceGroup",""), column_ifexists("resourceGroup",""))),
-    DurationSecs =
-        todouble(coalesce(
-            column_ifexists("DurationInSecs", real(null)),
-            column_ifexists("DurationInSeconds", real(null)),
-            column_ifexists("Duration", real(null))
-        )),
-    StartTime = todatetime(column_ifexists("StartTime", datetime(null))),
-    EndTime   = todatetime(column_ifexists("EndTime", datetime(null)))
-| extend
-    DurationSecs = iff(isnull(DurationSecs) and isnotnull(StartTime) and isnotnull(EndTime),
-                       datetime_diff("second", EndTime, StartTime),
-                       DurationSecs)
+    ResourceGroup = tostring(coalesce(column_ifexists("ResourceGroup",""), column_ifexists("resourceGroup","")))
 | where isnotempty(BackupItemUniqueId);
 
 let Monthly =
@@ -39,13 +28,26 @@ Jobs
     total_jobs = count(),
     success_jobs = countif(IsSuccess),
     failed_jobs  = countif(not(IsSuccess)),
-    last_success_time = maxif(TimeGenerated, IsSuccess),
-    duration_p50_secs = percentile(DurationSecs, 50),
-    duration_p95_secs = percentile(DurationSecs, 95)
+    last_success_time = maxif(TimeGenerated, IsSuccess)
   by Month, BackupItemUniqueId, BackupItemName, VaultName, SubscriptionId, ResourceGroup
 | extend
     success_rate = iif(total_jobs == 0, real(null), todouble(success_jobs) / todouble(total_jobs)),
-    hours_since_last_success = iif(isnull(last_success_time), real(null), datetime_diff("hour", now(), last_success_time));
+    hours_since_last_success = iif(isnull(last_success_time), real(null), datetime_diff("hour", now(), last_success_time)),
+    MonthEnd = endofmonth(Month),
+    WindowStart = endofmonth(Month) - SuccessRateWindow;
 
+let Trailing30d =
 Monthly
+| join kind=leftouter (Jobs | project BackupItemUniqueId, TimeGenerated, IsSuccess) on BackupItemUniqueId
+| where TimeGenerated between (WindowStart .. MonthEnd)
+| summarize
+    total_jobs_30d = count(),
+    success_jobs_30d = countif(IsSuccess),
+    failed_jobs_30d = countif(not(IsSuccess)),
+    success_rate_30d_asof_month_end = iif(count() == 0, real(null),
+        todouble(countif(IsSuccess)) / todouble(count()))
+  by Month, BackupItemUniqueId, BackupItemName, VaultName, SubscriptionId, ResourceGroup,
+     total_jobs, success_jobs, failed_jobs, success_rate, last_success_time, hours_since_last_success;
+
+Trailing30d
 | order by Month desc
